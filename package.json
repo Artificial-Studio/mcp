@@ -1,0 +1,36 @@
+{
+  "name": "@artificial-studio/mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Artificial Studio — generate images, videos, audio, and 3D models with AI",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "artificial-studio-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "artificial-studio",
+    "ai",
+    "image-generation",
+    "video-generation",
+    "audio-generation",
+    "3d-generation"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Artificial-Studio/mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

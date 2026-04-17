@@ -21,6 +21,8 @@ export interface SearchResult {
   models: Array<{
     slug: string;
     name: string;
+    cost: number;
+    costUnit: string;
     inputSchema: Record<string, unknown>;
   }>;
 }
@@ -135,4 +137,55 @@ export async function uploadFile(apiKey: string, filePath: string): Promise<Uplo
 
 export async function getAccount(apiKey: string): Promise<AccountInfo> {
   return request(`${BASE_URL}/api/account`, apiKey);
+}
+
+// --- Device Auth (RFC 8628) ---
+
+export interface DeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface DeviceTokenResponse {
+  access_token?: string;
+  token_type?: string;
+  error?: string;
+}
+
+export async function requestDeviceCode(): Promise<DeviceCodeResponse> {
+  const res = await fetch(`${BASE_URL}/auth/device`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error("Failed to start authentication");
+  return res.json() as Promise<DeviceCodeResponse>;
+}
+
+export async function pollDeviceToken(
+  deviceCode: string,
+  intervalMs = 5000,
+  timeoutMs = 900000
+): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(`${BASE_URL}/auth/device/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_code: deviceCode }),
+    });
+
+    const data = (await res.json()) as DeviceTokenResponse;
+
+    if (data.access_token) return data.access_token;
+    if (data.error && data.error !== "authorization_pending") {
+      throw new Error(`Authentication failed: ${data.error}`);
+    }
+
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error("Authentication timed out");
 }

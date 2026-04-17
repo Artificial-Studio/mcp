@@ -3,6 +3,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 import {
   searchTools,
   getToolDetail,
@@ -11,29 +14,122 @@ import {
   listGenerations,
   uploadFile,
   getAccount,
+  requestDeviceCode,
+  pollDeviceToken,
 } from "./api.js";
 
-function getApiKey(): string {
-  const key = process.env.ARTIFICIAL_STUDIO_API_KEY;
-  if (!key) {
-    throw new Error(
-      "ARTIFICIAL_STUDIO_API_KEY environment variable is not set. " +
-        "Get your API key at https://app.artificialstudio.ai/account/api-keys and set it with: " +
-        "export ARTIFICIAL_STUDIO_API_KEY=your_key_here"
-    );
+// --- Credential storage ---
+
+const CREDENTIALS_DIR = join(homedir(), ".artificial-studio");
+const CREDENTIALS_FILE = join(CREDENTIALS_DIR, "credentials.json");
+
+function loadStoredApiKey(): string | null {
+  try {
+    if (!existsSync(CREDENTIALS_FILE)) return null;
+    const data = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8"));
+    return data.api_key || null;
+  } catch {
+    return null;
   }
-  return key;
 }
 
-const server = new McpServer({
-  name: "artificial-studio",
-  version: "1.0.0",
-});
+function saveApiKey(apiKey: string): void {
+  mkdirSync(CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(CREDENTIALS_FILE, JSON.stringify({ api_key: apiKey }, null, 2), { mode: 0o600 });
+}
+
+function getApiKey(): string {
+  // 1. Environment variable takes priority
+  const envKey = process.env.ARTIFICIAL_STUDIO_API_KEY;
+  if (envKey) return envKey;
+
+  // 2. Stored credentials
+  const storedKey = loadStoredApiKey();
+  if (storedKey) return storedKey;
+
+  throw new Error(
+    "Not authenticated. Use the 'authenticate' tool to connect your Artificial Studio account, " +
+    "or set the ARTIFICIAL_STUDIO_API_KEY environment variable."
+  );
+}
+
+const server = new McpServer(
+  {
+    name: "artificial-studio",
+    version: "1.0.0",
+  },
+  {
+    instructions: `You are connected to Artificial Studio, an AI media generation platform.
+
+## Model selection workflow
+When the user asks to generate content (image, video, audio, 3D):
+1. Use search_tools or get_tool_detail to find the right tool and see available models with their costs.
+2. If the tool has multiple models, present the options to the user with name and cost (credits per generation/second) and ask which one they prefer.
+3. Once the user picks a model, remember it for subsequent generations with the same tool — don't ask again unless they request a change.
+4. If the user specifies a model by name upfront, use it directly without asking.
+
+## Cost awareness
+Each model has a "cost" (credits) and "costUnit" (per generation or per second for video). Always mention the cost when presenting model options so the user can make an informed choice.
+
+## Input discovery
+Always check the model's inputSchema before generating. Use the required fields and respect defaults for optional fields. Don't guess parameter names.`,
+  }
+);
+
+// --- Tool: authenticate ---
+server.tool(
+  "authenticate",
+  "Connect your Artificial Studio account. Opens a browser link where you log in and approve access. Only needed once — credentials are saved locally.",
+  {},
+  async () => {
+    // Check if already authenticated
+    try {
+      const key = getApiKey();
+      const account = await getAccount(key);
+      return {
+        content: [{
+          type: "text",
+          text: `Already authenticated as ${account.email} (${account.credits} credits, ${account.plan} plan). To re-authenticate, delete ~/.artificial-studio/credentials.json and try again.`,
+        }],
+      };
+    } catch {
+      // Not authenticated, proceed with device flow
+    }
+
+    const device = await requestDeviceCode();
+
+    const instructions = [
+      `To connect your Artificial Studio account:`,
+      ``,
+      `1. Open this URL in your browser:`,
+      `   ${device.verification_uri_complete}`,
+      ``,
+      `2. Verify the code matches: ${device.user_code}`,
+      ``,
+      `3. Click "Connect" to authorize.`,
+      ``,
+      `Waiting for authorization (expires in ${Math.floor(device.expires_in / 60)} minutes)...`,
+    ].join("\n");
+
+    // Poll for token
+    const apiKey = await pollDeviceToken(device.device_code, device.interval * 1000);
+
+    // Save credentials
+    saveApiKey(apiKey);
+
+    return {
+      content: [{
+        type: "text",
+        text: `${instructions}\n\nAuthenticated successfully! Credentials saved to ~/.artificial-studio/credentials.json`,
+      }],
+    };
+  }
+);
 
 // --- Tool: search ---
 server.tool(
   "search_tools",
-  "Search for available AI tools and models on Artificial Studio. Use this to discover the right tool and model for a task. Returns tools with their input schemas.",
+  "Search for available AI tools and models on Artificial Studio. Use this to discover the right tool and model for a task. Returns tools with their input schemas and pricing.",
   { query: z.string().describe("What you want to do, e.g. 'generate image', 'text to speech', '3d model'") },
   async ({ query }) => {
     const apiKey = getApiKey();
@@ -45,7 +141,7 @@ server.tool(
 // --- Tool: get_tool_detail ---
 server.tool(
   "get_tool_detail",
-  "Get detailed information about a specific tool, including all available models and their input schemas.",
+  "Get detailed information about a specific tool, including all available models, their input schemas, and pricing.",
   { tool_slug: z.string().describe("Tool slug, e.g. 'create-image', 'create-video', 'text-to-speech'") },
   async ({ tool_slug }) => {
     const apiKey = getApiKey();
@@ -57,7 +153,7 @@ server.tool(
 // --- Tool: generate ---
 server.tool(
   "generate",
-  "Run an AI generation on Artificial Studio. Submits the job and waits for the result — no need to poll manually. Returns the completed generation with output URL.",
+  "Run an AI generation on Artificial Studio. Submits the job and waits for the result. IMPORTANT: Before calling this, use get_tool_detail to discover available models and their inputSchema. If the user hasn't chosen a model yet and the tool has multiple options, present them with costs and ask for their preference first.",
   {
     tool: z.string().describe(
       "Tool to use, e.g. 'create-image', 'create-video', 'text-to-speech', 'text-to-3d', 'edit-image', 'animate-image', etc."

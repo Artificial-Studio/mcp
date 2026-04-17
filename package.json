@@ -1,6 +1,6 @@
 {
   "name": "@artificial-studio/mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for Artificial Studio — generate images, videos, audio, and 3D models with AI",
   "type": "module",
   "main": "dist/index.js",
